@@ -48,14 +48,74 @@ function App(){
   const [users,setUsers]=useState(INITIAL_USERS);
   const [lfg,setLfg]=useState(INITIAL_LFG);
   const [squads,setSquads]=useState(INITIAL_SQUADS);
-  const [profile,setProfile]=useState({displayName:'Demo Player',username:'demoplayer',bio:'Competitive when the team wants it, casual when we don\'t.',timezone:'America/New_York'});
+  const [profile,setProfile]=useState(null);
 
-  useEffect(()=>{
-    if(!supabase) return;
-    supabase.auth.getSession().then(({data})=>setSession(data.session));
-    const {data:{subscription}}=supabase.auth.onAuthStateChange((_e,s)=>setSession(s));
-    return ()=>subscription.unsubscribe();
-  },[]);
+  useEffect(() => {
+  if (!supabase) return;
+
+  let mounted = true;
+
+  async function loadProfile(userId) {
+    if (!userId) {
+      if (mounted) setProfile(null);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+
+    if (error) {
+      console.error('Failed to load profile:', error);
+      if (mounted) setProfile(null);
+      return;
+    }
+
+    if (mounted) {
+      setProfile(data);
+    }
+  }
+
+  async function initializeAuth() {
+    const { data, error } = await supabase.auth.getSession();
+
+    if (error) {
+      console.error('Failed to get session:', error);
+      return;
+    }
+
+    if (!mounted) return;
+
+    setSession(data.session);
+
+    if (data.session?.user) {
+      await loadProfile(data.session.user.id);
+    }
+  }
+
+  initializeAuth();
+
+  const {
+    data: { subscription }
+  } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+    if (!mounted) return;
+
+    setSession(newSession);
+
+    if (newSession?.user) {
+      await loadProfile(newSession.user.id);
+    } else {
+      setProfile(null);
+    }
+  });
+
+  return () => {
+    mounted = false;
+    subscription.unsubscribe();
+  };
+}, []);
   useEffect(()=>{ if(toast){const t=setTimeout(()=>setToast(''),2800);return()=>clearTimeout(t)}},[toast]);
 
   const selectedGame=DEMO_GAMES.find(g=>g.name===game);
@@ -70,15 +130,78 @@ function App(){
   function selectGame(name){setGame(name);setMode('All modes');navigate('lfg');}
   async function logout(){if(supabase) await supabase.auth.signOut();setSession(null);setToast('Signed out');}
   function sendFriend(name){setToast(`Friend request sent to ${name}`);}
-  function saveProfile(next){setProfile(next);setShowProfileEdit(false);setToast('Profile updated');}
-  function createLfg(post){setLfg(v=>[{...post,id:Date.now(),user:profile.displayName||'Demo Player'},...v]);setShowLfg(false);setToast('LFG post created');}
+async function saveProfile(next) {
+  if (!supabase || !session?.user) {
+    setToast('You must be signed in to update your profile.');
+    return;
+  }
+
+  const updates = {
+    display_name: next.display_name?.trim() || '',
+    username: next.username?.trim().toLowerCase() || '',
+    bio: next.bio?.trim() || '',
+    timezone: next.timezone?.trim() || ''
+  };
+
+  if (!updates.display_name || !updates.username) {
+    setToast('Display name and username are required.');
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .update(updates)
+    .eq('id', session.user.id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Profile update failed:', error);
+
+    if (error.code === '23505') {
+      setToast('That username is already taken.');
+    } else {
+      setToast(error.message);
+    }
+
+    return;
+  }
+
+  setProfile(data);
+  setShowProfileEdit(false);
+  setToast('Profile updated');
+}
+  function createLfg(post) {
+  setLfg(v => [
+    {
+      ...post,
+      id: Date.now(),
+      user: profile?.display_name || profile?.displayName || 'Demo Player'
+    },
+    ...v
+  ]);
+
+  setShowLfg(false);
+  setToast('LFG post created');
+}
   function toggleSave(id){setSquads(v=>v.map(s=>s.id===id?{...s,saved:!s.saved}:s));setToast('Saved squad updated');}
 
   return <div className="app">
     <header className="topbar">
       <div className="brand" onClick={()=>navigate('discover')}><div className="brandMark">S</div><div>SquadUp<span>.GG</span></div></div>
       <nav>{[['discover','Discover'],['lfg','LFG'],['squads','My Squads'],['friends','Players']].map(([id,label])=><button key={id} className={tab===id?'nav active':'nav'} onClick={()=>navigate(id)}>{label}</button>)}</nav>
-      <div className="topActions"><button className="iconButton" onClick={()=>document.querySelector('.searchBox input')?.focus()}><Search size={18}/></button>{session||profile.username==='demoplayer'?<button className="profilePill" onClick={()=>navigate('profile')}><span className="avatar">{profile.displayName[0]}</span> {profile.displayName}</button>:<button className="loginButton" onClick={()=>setShowLogin(true)}><LogIn size={17}/> Log in</button>}</div>
+      <div className="topActions"><button className="iconButton" onClick={()=>document.querySelector('.searchBox input')?.focus()}><Search size={18}/></button>{session ? (
+  <button className="profilePill" onClick={() => navigate('profile')}>
+    <span className="avatar">
+      {(profile?.display_name || profile?.displayName || 'P')[0].toUpperCase()}
+    </span>
+    {profile?.display_name || profile?.displayName || 'Loading...'}
+  </button>
+) : (
+  <button className="loginButton" onClick={() => setShowLogin(true)}>
+    <LogIn size={17}/> Log in
+  </button>
+)}</div>
     </header>
 
     <main>
@@ -112,7 +235,132 @@ function PlayerCard({u,onToast}){return <article className="card playerCard"><di
 function GameRow({g,rank,onClick}){return <button className="gameRow" onClick={onClick}><span className="rank">{String(rank).padStart(2,'0')}</span><div className="gameIcon">{g.name[0]}</div><div className="gameInfo"><b>{g.name}</b><small>{g.players} current players</small></div><ChevronRight size={17}/></button>}
 function LfgCard({p,onToast}){return <article className="card lfgCard"><div className="lfgHeader"><div className="avatar">{p.user[0]}</div><div><b>{p.user}</b><small>{p.game} · {p.mode}</small></div><span className="need"><Users size={14}/> {p.need} needed</span></div><p>{p.text}</p><div className="lfgMeta">{p.voice&&<span><Mic size={13}/> Voice required</span>}<span><Clock3 size={13}/> Active now</span></div><button className="joinButton" onClick={()=>onToast(`Join request sent for ${p.game} — ${p.mode}`)}>Request to join</button></article>}
 function Squads({squads,onSave,onToast}){return <section><SectionTitle title="Saved squads" action="New squad" onClick={()=>onToast('Squad creation is next — membership schema is ready.')}/><div className="squadGrid">{squads.map(s=><article className="card squadCard" key={s.id}><div className="squadTop"><div className="squadBadge"><Users/></div><button className="saveButton" onClick={()=>onSave(s.id)} aria-label="Save squad"><Bookmark size={16} fill={s.saved?'currentColor':'none'}/></button></div><h3>{s.name}</h3><p>{s.game} · {s.mode}</p><div className="memberBar"><span style={{width:`${Math.min(100,(s.members/s.max)*100)}%`}}/></div><div className="squadBottom"><span>{s.members}/{s.max} members</span><button onClick={()=>onToast(`Opened ${s.name}`)}>Open</button></div></article>)}</div></section>}
-function Profile({profile,session,onLogout,onEdit}){return <section className="profilePage"><div className="profileHeader"><div className="avatar huge">{profile.displayName[0]}</div><div><div className="eyebrow">YOUR PROFILE</div><h1>{profile.displayName}</h1><p>@{profile.username} · {profile.timezone}</p></div><button className="outlineButton" onClick={onEdit}><Pencil size={15}/> Edit profile</button></div><div className="profileGrid"><div className="card"><h3>Games</h3>{DEMO_GAMES.slice(0,4).map(g=><div className="miniGame" key={g.id}><span>{g.name}</span><Bookmark size={15}/></div>)}</div><div className="card"><h3>About</h3><p className="muted">{profile.bio||'Add a bio so teammates know what you like to play.'}</p><div className="profileStats"><span><b>4</b> games</span><span><b>12</b> friends</span><span><b>3</b> squads</span></div>{session&&<button className="dangerButton" onClick={onLogout}><LogOut size={15}/> Sign out</button>}</div></div></section>}
+function Profile({ profile, session, onLogout, onEdit }) {
+  if (!session) {
+    return (
+      <section className="profilePage">
+        <div className="card">
+          <h2>You aren't signed in</h2>
+          <p className="muted">
+            Log in to view your SquadUp profile.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <section className="profilePage">
+        <div className="card">
+          <h2>Loading profile...</h2>
+          <p className="muted">
+            Getting your SquadUp profile.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  const displayName =
+    profile.display_name ||
+    profile.displayName ||
+    'Player';
+
+  const username =
+    profile.username ||
+    'player';
+
+  const initial =
+    displayName.charAt(0).toUpperCase();
+
+  return (
+    <section className="profilePage">
+      <div className="profileHero card">
+        <div className="profileAvatar">
+          {initial}
+        </div>
+
+        <div className="profileIdentity">
+          <div className="eyebrow">YOUR PROFILE</div>
+
+          <h1>{displayName}</h1>
+
+          <p className="profileUsername">
+            @{username}
+          </p>
+
+          {profile.bio && (
+            <p className="profileBio">
+              {profile.bio}
+            </p>
+          )}
+        </div>
+
+        <div className="profileActions">
+          <button
+            className="outlineButton"
+            onClick={onEdit}
+          >
+            <Pencil size={15} />
+            Edit profile
+          </button>
+
+          <button
+            className="outlineButton"
+            onClick={onLogout}
+          >
+            <LogOut size={15} />
+            Log out
+          </button>
+        </div>
+      </div>
+
+      <div className="profileGrid">
+        <div className="card profileInfoCard">
+          <div className="sectionTitle">
+            <h2>About you</h2>
+          </div>
+
+          <div className="profileDetails">
+            <div>
+              <span>Username</span>
+              <strong>@{username}</strong>
+            </div>
+
+            <div>
+              <span>Timezone</span>
+              <strong>
+                {profile.timezone || 'Not set'}
+              </strong>
+            </div>
+
+            <div>
+              <span>Email</span>
+              <strong>
+                {session.user?.email || 'Hidden'}
+              </strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="card profileInfoCard">
+          <div className="sectionTitle">
+            <h2>Games</h2>
+          </div>
+
+          <div className="empty">
+            <Gamepad2 size={24} />
+            <div>
+              Add your games to start finding
+              compatible teammates.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
 function Empty({text}){return <div className="empty"><Gamepad2 size={24}/><div>{text}</div></div>}
 
 function LoginModal({close,onToast,onSession}){
@@ -124,6 +372,127 @@ function LfgModal({close,games,defaultGame,onCreate}){
  const [game,setGame]=useState(defaultGame||games[0].name);const [mode,setMode]=useState('');const [need,setNeed]=useState(1);const [text,setText]=useState('');const [voice,setVoice]=useState(true);const current=games.find(g=>g.name===game)||games[0];
  return <div className="modalBackdrop" onMouseDown={close}><div className="modal wide" onMouseDown={e=>e.stopPropagation()}><button className="close" onClick={close}><X/></button><div className="eyebrow">LOOKING FOR GROUP</div><h2>Post an LFG</h2><p>Tell players exactly what you are looking for.</p><form onSubmit={e=>{e.preventDefault();onCreate({game,mode:mode||current.modes[0],need:Number(need),text:text||'Looking for teammates.',voice})}}><div className="formGrid"><label>Game<select value={game} onChange={e=>{setGame(e.target.value);setMode('')}}>{games.map(g=><option key={g.id}>{g.name}</option>)}</select></label><label>Game mode<select value={mode||current.modes[0]} onChange={e=>setMode(e.target.value)}>{current.modes.map(m=><option key={m}>{m}</option>)}</select></label><label>Players needed<input type="number" min="1" max="99" value={need} onChange={e=>setNeed(e.target.value)}/></label></div><label>Message<textarea value={text} onChange={e=>setText(e.target.value)} placeholder="What kind of teammates are you looking for?"/></label><label className="checkRow"><input type="checkbox" checked={voice} onChange={e=>setVoice(e.target.checked)}/><Mic size={15}/> Voice required</label><button className="primaryButton">Publish LFG</button></form></div></div>
 }
-function ProfileModal({profile,close,onSave}){const [form,setForm]=useState(profile);return <div className="modalBackdrop" onMouseDown={close}><div className="modal" onMouseDown={e=>e.stopPropagation()}><button className="close" onClick={close}><X/></button><div className="eyebrow">ACCOUNT</div><h2>Edit profile</h2><p>Make it easier for the right players to find you.</p><form onSubmit={e=>{e.preventDefault();onSave(form)}}><label>Display name<input value={form.displayName} onChange={e=>setForm({...form,displayName:e.target.value})}/></label><label>Username<input value={form.username} onChange={e=>setForm({...form,username:e.target.value.replace(/\s/g,'').toLowerCase()})}/></label><label>Timezone<input value={form.timezone} onChange={e=>setForm({...form,timezone:e.target.value})}/></label><label>Bio<textarea maxLength="240" value={form.bio} onChange={e=>setForm({...form,bio:e.target.value})}/></label><button className="primaryButton">Save profile</button></form></div></div>}
+function ProfileModal({profile, close, onSave}) {
+  const [form, setForm] = useState({
+    display_name: profile?.display_name || '',
+    username: profile?.username || '',
+    timezone: profile?.timezone || '',
+    bio: profile?.bio || ''
+  });
+
+  const [saving, setSaving] = useState(false);
+
+  function update(field, value) {
+    setForm(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  }
+
+  async function submit(e) {
+    e.preventDefault();
+
+    if (!form.display_name.trim()) {
+      return;
+    }
+
+    if (!form.username.trim()) {
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      await onSave({
+        display_name: form.display_name.trim(),
+        username: form.username.trim().toLowerCase(),
+        timezone: form.timezone.trim(),
+        bio: form.bio.trim()
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modalBackdrop" onMouseDown={close}>
+      <div
+        className="modal"
+        onMouseDown={e => e.stopPropagation()}
+      >
+        <button className="close" onClick={close}>
+          <X/>
+        </button>
+
+        <div className="eyebrow">ACCOUNT</div>
+
+        <h2>Edit profile</h2>
+
+        <p>
+          Make it easier for the right players to find you.
+        </p>
+
+        <form onSubmit={submit}>
+          <label>
+            Display name
+            <input
+              value={form.display_name}
+              onChange={e => update('display_name', e.target.value)}
+              placeholder="Your display name"
+              maxLength={40}
+              required
+            />
+          </label>
+
+          <label>
+            Username
+            <input
+              value={form.username}
+              onChange={e =>
+                update(
+                  'username',
+                  e.target.value
+                    .replace(/\s/g, '')
+                    .toLowerCase()
+                )
+              }
+              placeholder="username"
+              maxLength={30}
+              required
+            />
+          </label>
+
+          <label>
+            Timezone
+            <input
+              value={form.timezone}
+              onChange={e => update('timezone', e.target.value)}
+              placeholder="America/New_York"
+              maxLength={64}
+            />
+          </label>
+
+          <label>
+            Bio
+            <textarea
+              maxLength={240}
+              value={form.bio}
+              onChange={e => update('bio', e.target.value)}
+              placeholder="Tell people what you like to play..."
+            />
+          </label>
+
+          <button
+            className="primaryButton"
+            type="submit"
+            disabled={saving}
+          >
+            {saving ? 'Saving...' : 'Save profile'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 createRoot(document.getElementById('root')).render(<App/>);
